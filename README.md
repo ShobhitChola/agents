@@ -1,200 +1,201 @@
 # SalesCode AI – LiveKit Voice Interruption Handling (NSUT Assignment)
 
-This branch implements a **filler-aware, interruption-safe voice assistant** on top of the LiveKit Agents framework.  
-Goal:
+This branch implements a **filler-aware, interruption-safe, multi-language voice assistant** using the LiveKit Agents framework.
 
-- Ignore obvious fillers while the agent is speaking  
-- Still treat those fillers as valid speech when the agent is quiet  
-- Immediately stop speaking on real commands like **"wait"**, **"stop"**, **"no"**, etc.  
-- All without modifying LiveKit’s base VAD logic.
+The system:
+- Ignores filler words while the **agent is speaking**
+- Treats fillers as valid input when the **agent is quiet**
+- Interrupts instantly on real commands like **"stop"**, **"wait"**, **"ruko"**, **"nahi"**
+- Supports **English + Hindi (Latin script)** filler/command detection
+- Allows **dynamic updates** through `filler_config.json`
+- Uses LiveKit’s built-in VAD + turn detection (no modification to internal logic)
 
-The implementation lives entirely in this branch so it does not affect the upstream `livekit/agents` main branch.
-
----
-
-## What Changed
-
-This branch adds a small, focused layer on top of LiveKit Agents:
-
-### `filler_agent/config.py`
-
-- Loads configurable filler and command word lists from environment variables:
-
-  - `IGNORED_FILLER_WORDS` (e.g. `uh,umm,hmm,haan`)
-  - `INTERRUPT_COMMAND_WORDS` (e.g. `wait,stop,no,hold on`)
-  - `FILLER_CONFIDENCE_THRESHOLD`
-
-- Provides a `Settings` dataclass with:
-
-  - LiveKit credentials
-  - OpenAI API key
-  - Sets of ignored filler words and interrupt command words
-  - A confidence threshold for treating short “hmm yeah”-style phrases as background noise.
-
-### `filler_agent/state_tracker.py`
-
-- Tracks the latest **agent** and **user** states (`initializing`, `listening`, `speaking`, etc.) as reported by:
-
-  - `agent_state_changed`
-  - `user_state_changed`
-
-- Exposes:
-
-  - `is_agent_speaking()`
-  - `is_user_speaking()`
-
-These helpers are used when deciding whether a given transcript should:
-
-- Interrupt the agent,
-- Be ignored as filler, or
-- Be treated as normal user speech.
-
-### `filler_agent/filler_classifier.py`
-
-Core decision logic for each transcription segment:
-
-- `classify_transcript(...)` returns one of:
-
-  - `"ignore_filler"` – fillers while the agent is speaking  
-  - `"interrupt_agent"` – real commands like `stop` / `wait`  
-  - `"user_speech"` – normal utterances
-
-Main rules:
-
-1. **Agent not speaking → always user speech**  
-   Even `"umm"` counts as a valid user turn when the agent is quiet.
-
-2. **Agent speaking:**
-   - If any word is in `interrupt_command_words` → `"interrupt_agent"`.
-   - If all tokens are fillers (in `ignored_filler_words`) → `"ignore_filler"`.
-   - Very short “confirmation” phrases like `"hmm yeah"` or `"haan"` can be treated as ignorable background if confidence is low.
-   - Otherwise, treat as `"interrupt_agent"` (e.g. `"no not that one"`, `"umm okay stop"`).
-
-### `agent.py`
-
-Main entrypoint for the **assignment agent**:
-
-- Creates an `AgentSession` with:
-
-  - STT: `assemblyai/universal-streaming:en`
-  - LLM: `openai/gpt-4.1-mini`
-  - TTS: `cartesia/sonic-3:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc`
-  - VAD: `silero.VAD.load()`
-  - Turn detection: `MultilingualModel()`
-  - `allow_interruptions=True` (default)
-  - `min_interruption_words=2`  
-    → very short one-word noises are less likely to interrupt.
-
-- Registers event handlers:
-
-  - `agent_state_changed` – updates `AgentStateTracker`.
-  - `user_state_changed` – updates `AgentStateTracker`.
-  - `user_input_transcribed` – **central place where filler logic runs**.
-
-- On each `user_input_transcribed` event:
-
-  1. Checks whether the agent is currently speaking via `state_tracker.is_agent_speaking()`.
-  2. Calls `classify_transcript(...)` with:
-
-     - `transcript=event.transcript`
-     - `agent_speaking`
-     - `is_final=event.is_final`
-     - `ignored_filler_words` / `interrupt_command_words` from `Settings`
-
-  3. Logs the decision:
-
-     ```text
-     Transcript='stop' (final=False, agent_speaking=True) => interrupt_agent
-     ```
-
-  4. If decision is `"interrupt_agent"` **and** the agent is speaking, it calls:
-
-     ```python
-     session.interrupt()
-     ```
-
-  5. If decision is `"ignore_filler"`, the event is logged and **no interruption** is triggered.
-
-### `baseline_agent.py`
-
-- A minimal voice agent using the same STT/LLM/TTS stack, but:
-
-  - **No custom filler logic**
-  - `allow_interruptions` left as default (True)
-  - No `user_input_transcribed` handler
-
-- This serves as a **baseline** to compare how the agent behaves **with vs without** the filler-aware interruption handler.
+This work lives only in this branch and does not affect upstream `livekit/agents`.
 
 ---
 
-## What Works
+# What Changed (Overview of New Logic)
 
-- **Filler ignoring while agent speaks**
+## `filler_agent/config.py`
+Loads configuration from `.env`:
+- Filler words (EN + HI)
+- Command words (EN + HI)
+- Confidence threshold
+- Default language
+- Path to dynamic config file `filler_config.json`
 
-  - Words like `uh`, `umm`, `hmm`, `haan` (configurable via env) are treated as fillers when the agent is speaking.
-  - These do **not** interrupt TTS and are logged as `"ignore_filler"` decisions.
-  - `min_interruption_words=2` further reduces the chance that single-word noises prematurely cut off speech.
-
-- **Same fillers count as speech when agent is quiet**
-
-  - When the agent is not currently speaking, *any* transcript (including `"umm"`, `"haan"`) is treated as `"user_speech"`.
-  - This matches the requirement: **fillers should still be valid speech when the agent is quiet**.
-
-- **Real interruption commands**
-
-  - English commands (configurable): `wait`, `stop`, `no`, `hold on`, etc.
-  - These words are loaded from `INTERRUPT_COMMAND_WORDS`.
-  - When spoken while the agent is mid-utterance:
-
-    - `classify_transcript()` returns `"interrupt_agent"`.
-    - The handler calls `session.interrupt()` to stop TTS immediately.
-    - This ensures **real-time responsiveness** even with the filler filter.
-
-- **Background murmurs / short acknowledgements**
-
-  - Very short phrases like `"hmm yeah"` or `"haan"` while the agent is talking can be treated as **non-interrupting confirmations**.
-  - Combined with `min_interruption_words`, this reduces false positives from background speech.
-
-- **Logging for debugging**
-
-  - Every transcription segment is logged with:
-
-    - Transcript text
-    - `is_final` flag
-    - Whether the agent was currently speaking
-    - Classification decision (`ignore_filler`, `interrupt_agent`, `user_speech`)
-
-  - This makes it easy to inspect behavior and tune the word lists for different languages or domains.
+Produces a central `Settings` object.
 
 ---
 
-## Known Issues / Limitations
+## `filler_agent/state_tracker.py`
+Tracks:
+- Agent state (`listening`, `thinking`, `speaking`)
+- User state (`speaking`, `listening`, `away`)
 
-- **TTS latency / choppiness**
-
-  - On slower networks or machines, Cartesia TTS can occasionally log:
-    - `"flush audio emitter due to slow audio generation"`
-  - This is a performance characteristic of network + TTS model, not of the filler logic itself.
-
-- **ASR spelling–dependent word lists**
-
-  - Detection of commands like `"ruko"`, `"band"`, `"nahi"` depends on how STT spells them.
-  - If a phrase is transcribed differently (e.g. `"rukko"`), it must be added to `INTERRUPT_COMMAND_WORDS` to be consistently recognized.
-
-- **Confidence handling is placeholder**
-
-  - `FILLER_CONFIDENCE_THRESHOLD` is wired into the classifier, but most STT providers in this setup do not expose per-segment confidence to the event handler.
-  - For now, short confirmation phrases are treated as ignorable when `confidence` is `None` or below `0.5`.
+Helpers used throughout classification:
+- `is_agent_speaking()`
+- `is_user_speaking()`
 
 ---
 
-## Steps to Run
+## `filler_agent/filler_classifier.py`
+Classifies each transcript into:
+- `"ignore_filler"`
+- `"interrupt_agent"`
+- `"user_speech"`
 
-### 1. Clone and set up
+Rules:
+1. If agent **not speaking** → everything = `"user_speech"`
+2. If agent **speaking**:
+   - Contains any interrupt word → `"interrupt_agent"`
+   - All tokens are fillers → `"ignore_filler"`
+   - Very short confirmations (`"haan"`, `"hmm yeah"`) → ignore
+   - Anything else → `"interrupt_agent"`
 
-Clone your fork (this branch lives on your fork, not on upstream):
+---
 
+## `filler_agent/runtime_config.py`
+Enables **runtime updates** to filler + command words.
+
+Whenever you save `filler_config.json`, the agent updates itself without restart:
+- Logs new settings
+- Updates the in-memory word lists
+- Classification immediately changes
+
+---
+
+## `agent.py`
+The main assignment agent.
+
+Implements:
+- Multi-language detection
+- Filler-aware interruption handling
+- Dynamic runtime configuration
+- State tracking
+- `min_interruption_words=2` to reduce false positives
+
+Uses:
+- STT: AssemblyAI Universal Streaming
+- LLM: OpenAI GPT-4.1-mini
+- TTS: Cartesia Sonic
+- Turn detection: `MultilingualModel()`
+
+---
+
+## `baseline_agent.py`
+A comparison agent:
+- No custom filler logic
+- Default LiveKit interruption behavior
+- Demonstrates how much better the custom agent performs
+
+---
+
+# What Works (Verified)
+
+### ✔ Filler ignoring while agent speaks
+Ignored during TTS:
+- uh
+- umm
+- hmm
+- haan
+- any dynamic word you add (e.g., “basically”)
+
+### ✔ Fillers treated as normal speech when agent is quiet
+Even `"umm"` becomes a valid prompt → `"user_speech"`
+
+### ✔ Real interruption commands
+English:
+- stop
+- wait
+- no
+- hold on
+
+Hindi:
+- ruko
+- band
+- nahi
+
+### ✔ Multi-language detection  
+STT language tags:
+- `"lang=en"` → English lists
+- `"lang=hi"` → Hindi lists
+
+### ✔ Live dynamic updates  
+Editing `filler_config.json` changes behavior instantly.
+
+### ✔ Baseline comparison  
+Baseline interrupts on ANY noise → bad  
+Custom agent interrupts only on meaningful commands → correct
+
+---
+
+# Known Issues
+
+### • STT spelling variations  
+If STT writes “ruko” as “rukko”, add both spellings.
+
+### • Hindi must be spoken in Latin form  
+Works with “ruko”, not “रुको”.
+
+### • TTS can be slow  
+Cartesia may show latency logs.
+
+### • STT confidence is not exposed  
+Threshold is a best-effort placeholder.
+
+---
+
+# Installation (Anyone Can Run This)
+
+## 1. Clone the repo
 ```bash
-git clone https://github.com/<your-username>/agents.git
+git clone https://github.com/ShobhitChola/agents.git
 cd agents
 git checkout feature/livekit-interrupt-handler-ShobhitChola
+
+## 2. Create a virtual environment
+```bash
+python3 -m venv .venv
+source .venv/bin/activate       # macOS / Linux
+# .venv\Scripts\activate        # Windows
+
+## 3. Install dependencies
+pip install "livekit-agents[openai,silero,deepgram,cartesia,turn-detector]~=1.3"
+pip install python-dotenv
+
+## 4. create .env
+LIVEKIT_URL=wss://<your-instance>.livekit.cloud
+LIVEKIT_API_KEY=xxx
+LIVEKIT_API_SECRET=xxx
+
+OPENAI_API_KEY=sk-xxxx
+
+DEFAULT_LANGUAGE=en
+
+IGNORED_FILLER_WORDS_EN=uh,umm,hmm
+IGNORED_FILLER_WORDS_HI=haan,accha,arey
+
+INTERRUPT_COMMAND_WORDS_EN=stop,wait,no,hold on
+INTERRUPT_COMMAND_WORDS_HI=ruko,band,nahi
+
+FILLER_CONFIDENCE_THRESHOLD=0.6
+FILLER_CONFIG_PATH=./filler_config.json
+
+## 5. Create filler_config.json:
+{
+  "ignored": {
+    "en": ["uh", "umm", "hmm"],
+    "hi": ["haan", "accha", "arey"]
+  },
+  "commands": {
+    "en": ["stop", "wait", "no", "hold on"],
+    "hi": ["ruko", "band", "nahi"]
+  }
+}
+
+## 6. Run the main agent
+python agent.py console
+
+## 7. Run the baseline agent(original one without any changes)
+python baselin_agent.py console
