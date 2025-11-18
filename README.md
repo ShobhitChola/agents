@@ -149,13 +149,13 @@ Threshold is a best-effort placeholder.
 # Installation (Anyone Can Run This)
 
 ## 1. Clone the repo
-```bash
+
 git clone https://github.com/ShobhitChola/agents.git
 cd agents
 git checkout feature/livekit-interrupt-handler-ShobhitChola
 
 ## 2. Create a virtual environment
-```bash
+
 python3 -m venv .venv
 source .venv/bin/activate       # macOS / Linux
 # .venv\Scripts\activate        # Windows
