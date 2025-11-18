@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import logging
+import asyncio  # NEW: needed for asyncio.create_task
 
 from dotenv import load_dotenv
 from livekit import agents
-from livekit.agents import AgentSession, Agent, RoomInputOptions, UserInputTranscribedEvent
+from livekit.agents import (
+    AgentSession,
+    Agent,
+    RoomInputOptions,
+    UserInputTranscribedEvent,
+)
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from filler_agent.config import get_settings
 from filler_agent.state_tracker import AgentStateTracker
 from filler_agent.filler_classifier import classify_transcript
+from filler_agent.runtime_config import RuntimeWordConfig, watch_config_file
 
 # Load .env so LIVEKIT_* and OPENAI_API_KEY are available
 load_dotenv()
@@ -37,11 +44,35 @@ async def entrypoint(ctx: agents.JobContext):
     """
     settings = get_settings()
     logger.info("Starting session")
-    logger.info("Ignored filler words: %s", settings.ignored_filler_words)
-    logger.info("Interrupt command words: %s", settings.interrupt_command_words)
+    logger.info("Ignored filler words (global): %s", settings.ignored_filler_words)
+    logger.info(
+        "Interrupt command words (global): %s", settings.interrupt_command_words
+    )
+    logger.info("Default language: %s", settings.default_language)
+
+    # Runtime config object that knows per-language word lists.
+    runtime_config = RuntimeWordConfig(
+        ignored_by_lang=settings.ignored_filler_words_by_lang,
+        commands_by_lang=settings.interrupt_command_words_by_lang,
+        default_language=settings.default_language,
+    )
+
+    # OPTIONAL BONUS: watch a JSON file for dynamic updates if configured
+    if settings.dynamic_config_path:
+        logger.info(
+            "Dynamic filler config enabled. Watching: %s",
+            settings.dynamic_config_path,
+        )
+        # Older livekit-agents JobContext doesn't expose create_task,
+        # so we use the standard asyncio.create_task instead.
+        asyncio.create_task(
+            watch_config_file(settings.dynamic_config_path, runtime_config)
+        )
+    else:
+        logger.info("Dynamic filler config not enabled (FILLER_CONFIG_PATH not set).")
 
     # Create the AgentSession: this wires up STT, LLM, TTS, VAD, and turn detection.
-    # We use the same pattern as the Voice AI quickstart docs.
+    # We keep LiveKit's own interruption system ON, but tune it with min_interruption_words.
     session = AgentSession(
         stt="assemblyai/universal-streaming:en",
         llm="openai/gpt-4.1-mini",
@@ -50,14 +81,12 @@ async def entrypoint(ctx: agents.JobContext):
         turn_detection=MultilingualModel(),
 
         # Let LiveKit handle normal interruptions
-        allow_interruptions=True,           # (or just omit this, True is the default)
+        allow_interruptions=True,  # True is default, but we make it explicit
 
-        # NEW: require at least 2 words before LiveKit treats speech as an interruption.
-        # So 1-word fillers (“uh”, “umm”, “haan”) won’t cut the agent off.
+        # Require at least 2 words before LiveKit treats speech as an interruption.
+        # So 1-word fillers (“uh”, “umm”, “haan”) are less likely to cut the agent off.
         min_interruption_words=2,
     )
-
-
 
     state_tracker = AgentStateTracker()
 
@@ -79,20 +108,27 @@ async def entrypoint(ctx: agents.JobContext):
     def on_user_input_transcribed(event: UserInputTranscribedEvent):
         agent_speaking = state_tracker.is_agent_speaking()
 
+        # Try to detect language, e.g. "en", "en-US", "hi"
+        lang = (event.language or settings.default_language).split("-")[0].lower()
+
+        # Get the correct per-language word sets, with fallbacks
+        ignored_words, command_words = runtime_config.get_sets_for_language(lang)
+
         decision = classify_transcript(
             transcript=event.transcript,
             agent_speaking=agent_speaking,
             is_final=event.is_final,
-            ignored_filler_words=settings.ignored_filler_words,
-            interrupt_command_words=settings.interrupt_command_words,
+            ignored_filler_words=ignored_words,
+            interrupt_command_words=command_words,
             confidence=None,  # placeholder; most STT providers don't expose this here yet
         )
 
         logger.info(
-            "Transcript='%s' (final=%s, agent_speaking=%s) => %s",
+            "Transcript='%s' (final=%s, agent_speaking=%s, lang=%s) => %s",
             event.transcript,
             event.is_final,
             agent_speaking,
+            lang,
             decision,
         )
 
