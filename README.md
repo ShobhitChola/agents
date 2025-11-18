@@ -1,5 +1,7 @@
 # SalesCode AI – LiveKit Voice Interruption Handling (NSUT Assignment)
 
+🎥 Video demonstration link : https://drive.google.com/file/d/10h2zIrXfe0wppwoFDawJ21qy4KeRHNwb/view?usp=drivesdk
+
 This branch implements a **filler-aware, interruption-safe, multi-language voice assistant** using the LiveKit Agents framework.
 
 The system:
@@ -146,56 +148,63 @@ Threshold is a best-effort placeholder.
 
 ---
 
-# Installation (Anyone Can Run This)
+## Installation & Setup
 
-## 1. Clone the repo
+### 1. Clone the repository
 
+```bash
 git clone https://github.com/ShobhitChola/agents.git
-cd agents
-git checkout feature/livekit-interrupt-handler-ShobhitChola
+cd <project-root>
+```
 
-## 2. Create a virtual environment
+2. Create a virtual environment
 
-python3 -m venv .venv
-source .venv/bin/activate       # macOS / Linux
-# .venv\Scripts\activate        # Windows
+```
+python -m venv .venv
+source .venv/bin/activate      # macOS / Linux
+.venv\Scripts\activate         # Windows
+```
 
-## 3. Install dependencies
+3. Install dependencies
+
+```
 pip install "livekit-agents[openai,silero,deepgram,cartesia,turn-detector]~=1.3"
 pip install python-dotenv
+```
 
-## 4. create .env
-LIVEKIT_URL=wss://<your-instance>.livekit.cloud
-LIVEKIT_API_KEY=xxx
-LIVEKIT_API_SECRET=xxx
+4. Create a .env file
+    ```
+    LIVEKIT_URL=your_url
+    LIVEKIT_API_KEY=your_key
+    LIVEKIT_API_SECRET=your_secret
+    OPENAI_API_KEY=sk-xxxx
+    LIVEKIT_INFERENCE_USE_DIRECT_OPENAI=1
+    DEFAULT_LANGUAGE=en
+    FILLER_CONFIDENCE_THRESHOLD=0.6
+    FILLER_CONFIG_PATH=./agent_profile.json
+    ```
 
-OPENAI_API_KEY=sk-xxxx
+5. Create the dynamic config file
 
-DEFAULT_LANGUAGE=en
+```
+filler_config.json
+```
 
-IGNORED_FILLER_WORDS_EN=uh,umm,hmm
-IGNORED_FILLER_WORDS_HI=haan,accha,arey
+6. Running the Agents (Advance Model)
 
-INTERRUPT_COMMAND_WORDS_EN=stop,wait,no,hold on
-INTERRUPT_COMMAND_WORDS_HI=ruko,band,nahi
-
-FILLER_CONFIDENCE_THRESHOLD=0.6
-FILLER_CONFIG_PATH=./filler_config.json
-
-## 5. Create filler_config.json:
-{
-  "ignored": {
-    "en": ["uh", "umm", "hmm"],
-    "hi": ["haan", "accha", "arey"]
-  },
-  "commands": {
-    "en": ["stop", "wait", "no", "hold on"],
-    "hi": ["ruko", "band", "nahi"]
-  }
-}
-
-## 6. Run the main agent
+```
 python agent.py console
+```
 
-## 7. Run the baseline agent(original one without any changes)
-python baselin_agent.py console
+7. Run the baseline agent (Basic Model)
+```
+python basline_agent.py console
+```
+
+# Verified Behaviour During Testing
+- Properly ignores filler words during text-to-speech.
+- Properly recognizes fillers as spoken input when the agent is silent.
+- Instantly interrupts when it receives real interruption commands.
+- Selects the appropriate language profile based on speech-to-text detection.
+- Responds immediately to JSON updates.
+- The baseline agent interrupts on any noise (intended behavior).
